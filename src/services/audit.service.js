@@ -350,8 +350,15 @@ async function logSystemError(error, context = {}) {
   });
 }
 
+// =============================================================================
+// READ / QUERY FUNCTIONS
+// =============================================================================
+
 /**
  * Get audit logs with filtering and pagination
+ *
+ * @param {Object} options - From validated query params
+ * @returns {{ logs, pagination }}
  */
 async function getAuditLogs({
   userId,
@@ -361,99 +368,313 @@ async function getAuditLogs({
   startDate,
   endDate,
   page = 1,
-  limit = 50
+  limit = 50,
+  sortOrder = 'desc'
 }) {
-  const where = {};
+  const pageNum = typeof page === 'string' ? parseInt(page, 10) : Number(page);
+  const limitNum = typeof limit === 'string' ? parseInt(limit, 10) : Number(limit);
 
-  if (userId) where.userId = userId;
-  if (action) where.action = action;
-  if (entity) where.entity = entity;
+  const where = {};
+  if (userId)   where.userId   = userId;
+  if (action)   where.action   = action;
+  if (entity)   where.entity   = entity;
   if (entityId) where.entityId = entityId;
-  
+
   if (startDate || endDate) {
     where.timestamp = {};
     if (startDate) where.timestamp.gte = new Date(startDate);
-    if (endDate) where.timestamp.lte = new Date(endDate);
+    if (endDate)   where.timestamp.lte = new Date(endDate);
   }
 
-  const skip = (page - 1) * limit;
+  const skip = (pageNum - 1) * limitNum;
 
-  const [logs, total] = await Promise.all([
+  const [logs, totalCount] = await Promise.all([
     prisma.auditLog.findMany({
       where,
       include: {
-        user: {
-          select: {
-            id: true,
-            name: true,
-            email: true
-          }
-        }
+        user: { select: { id: true, name: true, email: true, role: true } }
       },
-      orderBy: { timestamp: 'desc' },
+      orderBy: { timestamp: sortOrder },
       skip,
-      take: limit
+      take: limitNum
     }),
     prisma.auditLog.count({ where })
   ]);
 
-  return { logs, total };
+  return {
+    logs,
+    pagination: {
+      currentPage: pageNum,
+      totalPages: Math.ceil(totalCount / limitNum),
+      totalCount,
+      limit: limitNum,
+      hasNextPage: pageNum < Math.ceil(totalCount / limitNum),
+      hasPrevPage: pageNum > 1
+    }
+  };
 }
 
 /**
- * Get chain of custody for specific evidence
+ * Get chain of custody for specific evidence item
+ * Returns logs in chronological order (oldest first) for legal review
+ *
+ * @param {string} evidenceId
+ * @returns {Promise<Array>} Ordered log entries
  */
 async function getEvidenceChainOfCustody(evidenceId) {
-  return prisma.auditLog.findMany({
-    where: {
-      entity: 'EVIDENCE',
-      entityId: evidenceId
-    },
+  // Verify the evidence exists first
+  const evidence = await prisma.evidence.findUnique({
+    where: { id: evidenceId },
+    select: {
+      id: true,
+      originalName: true,
+      sha256Hash: true,
+      fileType: true,
+      fileSize: true,
+      status: true,
+      uploadedAt: true,
+      caseId: true,
+      case: { select: { caseNumber: true, title: true } }
+    }
+  });
+
+  if (!evidence) return null;
+
+  const logs = await prisma.auditLog.findMany({
+    where: { entity: 'EVIDENCE', entityId: evidenceId },
     include: {
-      user: {
-        select: {
-          id: true,
-          name: true,
-          email: true,
-          role: true
-        }
-      }
+      user: { select: { id: true, name: true, email: true, role: true } }
     },
     orderBy: { timestamp: 'asc' }
   });
+
+  return {
+    evidence: {
+      ...evidence,
+      fileSize: evidence.fileSize.toString()
+    },
+    chainOfCustody: logs,
+    totalEvents: logs.length
+  };
 }
 
 /**
- * Get all audit logs for a case (including its evidence)
+ * Get all audit logs for a case (case events + all its evidence events)
+ * Sorted chronologically — this is the full chain of custody for a case
+ *
+ * @param {string} caseId
+ * @returns {Promise<Object>}
  */
 async function getCaseAuditTrail(caseId) {
-  // First, get all evidence IDs for this case
-  const evidence = await prisma.evidence.findMany({
-    where: { caseId },
-    select: { id: true }
+  // Verify case exists
+  const caseData = await prisma.case.findUnique({
+    where: { id: caseId },
+    select: {
+      id: true,
+      caseNumber: true,
+      title: true,
+      status: true,
+      createdAt: true,
+      closedAt: true
+    }
   });
-  
-  const evidenceIds = evidence.map(e => e.id);
 
-  return prisma.auditLog.findMany({
+  if (!caseData) return null;
+
+  // Collect all evidence IDs in this case (including deleted — full history)
+  const evidenceList = await prisma.evidence.findMany({
+    where: { caseId },
+    select: { id: true, originalName: true }
+  });
+
+  const evidenceIds = evidenceList.map(e => e.id);
+
+  const logs = await prisma.auditLog.findMany({
     where: {
       OR: [
-        { entity: 'CASE', entityId: caseId },
+        { entity: 'CASE',     entityId: caseId },
         { entity: 'EVIDENCE', entityId: { in: evidenceIds } }
       ]
     },
     include: {
-      user: {
-        select: {
-          id: true,
-          name: true,
-          email: true,
-          role: true
-        }
-      }
+      user: { select: { id: true, name: true, email: true, role: true } }
     },
     orderBy: { timestamp: 'asc' }
   });
+
+  return {
+    case: caseData,
+    evidenceItems: evidenceList,
+    auditTrail: logs,
+    totalEvents: logs.length
+  };
+}
+
+/**
+ * Get audit history for a specific user
+ *
+ * @param {string} targetUserId
+ * @param {{ page, limit, sortOrder }} options
+ */
+async function getUserAuditHistory(targetUserId, { page = 1, limit = 50, sortOrder = 'desc' } = {}) {
+  const pageNum = typeof page === 'string' ? parseInt(page, 10) : Number(page);
+  const limitNum = typeof limit === 'string' ? parseInt(limit, 10) : Number(limit);
+
+  const where = { userId: targetUserId };
+  const skip = (pageNum - 1) * limitNum;
+
+  const [logs, totalCount] = await Promise.all([
+    prisma.auditLog.findMany({
+      where,
+      include: {
+        user: { select: { id: true, name: true, email: true } }
+      },
+      orderBy: { timestamp: sortOrder },
+      skip,
+      take: limitNum
+    }),
+    prisma.auditLog.count({ where })
+  ]);
+
+  return {
+    logs,
+    pagination: {
+      currentPage: pageNum,
+      totalPages: Math.ceil(totalCount / limitNum),
+      totalCount,
+      limit: limitNum,
+      hasNextPage: pageNum < Math.ceil(totalCount / limitNum),
+      hasPrevPage: pageNum > 1
+    }
+  };
+}
+
+/**
+ * Get audit statistics — summary counts useful for the dashboard
+ */
+async function getAuditStatistics() {
+  const [
+    totalLogs,
+    logsToday,
+    actionCounts,
+    recentActivity
+  ] = await Promise.all([
+    // Total log entries ever
+    prisma.auditLog.count(),
+
+    // Logs from the last 24 hours
+    prisma.auditLog.count({
+      where: { timestamp: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }
+    }),
+
+    // Count by action type
+    prisma.auditLog.groupBy({
+      by: ['action'],
+      _count: true,
+      orderBy: { _count: { action: 'desc' } }
+    }),
+
+    // Most recent 10 entries
+    prisma.auditLog.findMany({
+      include: { user: { select: { id: true, name: true, email: true } } },
+      orderBy: { timestamp: 'desc' },
+      take: 10
+    })
+  ]);
+
+  return {
+    totalLogs,
+    logsToday,
+    byAction: actionCounts.reduce((acc, a) => {
+      acc[a.action] = a._count;
+      return acc;
+    }, {}),
+    recentActivity
+  };
+}
+
+// =============================================================================
+// CSV EXPORT
+// =============================================================================
+
+/**
+ * Escape a CSV field — wrap in quotes and escape internal quotes
+ */
+function escapeCsvField(value) {
+  if (value === null || value === undefined) return '';
+  const str = String(value).replace(/"/g, '""');
+  return `"${str}"`;
+}
+
+/**
+ * Build a CSV row from an audit log entry
+ */
+function logToCsvRow(log) {
+  const fields = [
+    log.id,
+    log.timestamp ? new Date(log.timestamp).toISOString() : '',
+    log.action,
+    log.entity,
+    log.entityId || '',
+    log.user ? log.user.name  : 'System',
+    log.user ? log.user.email : '',
+    log.user ? log.user.role  : '',
+    log.ipAddress || '',
+    log.details ? JSON.stringify(log.details) : ''
+  ];
+  return fields.map(escapeCsvField).join(',');
+}
+
+/**
+ * Export audit logs as a CSV string
+ *
+ * @param {Object} filters - Same filter options as getAuditLogs, plus optional caseId
+ * @returns {Promise<string>} CSV content
+ */
+async function exportAuditLogsCsv(filters = {}) {
+  const { caseId, userId, action, entity, startDate, endDate } = filters;
+
+  let where = {};
+
+  // If scoped to a case, pull case events + all evidence events for that case
+  if (caseId) {
+    const evidenceList = await prisma.evidence.findMany({
+      where: { caseId },
+      select: { id: true }
+    });
+    const evidenceIds = evidenceList.map(e => e.id);
+
+    where.OR = [
+      { entity: 'CASE',     entityId: caseId },
+      { entity: 'EVIDENCE', entityId: { in: evidenceIds } }
+    ];
+  }
+
+  if (userId)   where.userId   = userId;
+  if (action)   where.action   = action;
+  if (entity)   where.entity   = entity;
+
+  if (startDate || endDate) {
+    where.timestamp = {};
+    if (startDate) where.timestamp.gte = new Date(startDate);
+    if (endDate)   where.timestamp.lte = new Date(endDate);
+  }
+
+  // Fetch all matching logs (no pagination — this is a full export)
+  const logs = await prisma.auditLog.findMany({
+    where,
+    include: { user: { select: { id: true, name: true, email: true, role: true } } },
+    orderBy: { timestamp: 'asc' }
+  });
+
+  const header = [
+    'ID', 'Timestamp', 'Action', 'Entity', 'Entity ID',
+    'User Name', 'User Email', 'User Role', 'IP Address', 'Details'
+  ].map(escapeCsvField).join(',');
+
+  const rows = logs.map(logToCsvRow);
+
+  return [header, ...rows].join('\n');
 }
 
 module.exports = {
@@ -475,7 +696,12 @@ module.exports = {
   logEvidenceDeleted,
   logEvidenceIntegrityCheck,
   logSystemError,
+  // Read / query
   getAuditLogs,
   getEvidenceChainOfCustody,
-  getCaseAuditTrail
+  getCaseAuditTrail,
+  getUserAuditHistory,
+  getAuditStatistics,
+  // Export
+  exportAuditLogsCsv
 };

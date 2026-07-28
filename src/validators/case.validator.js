@@ -134,9 +134,10 @@ const listCasesQuerySchema = z.object({
   priority: z
     .string()
     .optional()
-    .transform((val) => val ? parseInt(val, 10) : undefined)
-    .refine((val) => val === undefined || (val >= 1 && val <= 5), {
-      message: 'Priority must be between 1 and 5'
+    .transform((val) => {
+      if (val === undefined || val === '') return undefined;
+      const num = parseInt(val, 10);
+      return Number.isNaN(num) ? undefined : num;
     }),
   assignedTo: z
     .string()

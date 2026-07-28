@@ -33,6 +33,7 @@ const evidenceRoutes = require('./routes/evidence.routes');
 const auditRoutes = require('./routes/audit.routes');
 const notificationRoutes = require('./routes/notification.routes');
 const dashboardRoutes = require('./routes/dashboard.routes');
+const reportRoutes = require('./routes/report.routes');
 
 const app = express();
 
@@ -159,6 +160,7 @@ app.use('/api/v1/evidence', evidenceRoutes);
 app.use('/api/v1/audit', auditRoutes);
 app.use('/api/v1/notifications', notificationRoutes);
 app.use('/api/v1/dashboard', dashboardRoutes);
+app.use('/api/v1/reports', reportRoutes);
 
 // =============================================================================
 // ERROR HANDLING

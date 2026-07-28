@@ -1,21 +1,94 @@
 /**
  * Dashboard Routes
- * 
- * Routes for statistics and reporting
+ *
+ * All authenticated users can access the dashboard.
+ * Data is automatically scoped by role:
+ *   ADMIN / SUPERVISOR  → system-wide
+ *   INVESTIGATOR        → their assigned cases only
  */
 
 const express = require('express');
 const router = express.Router();
 
+const dashboardController = require('../controllers/dashboard.controller');
+const { authenticate } = require('../middleware/auth.middleware');
+
+// =============================================================================
+// SWAGGER SCHEMAS
+// =============================================================================
+
 /**
  * @swagger
- * /dashboard/stats:
+ * components:
+ *   schemas:
+ *     DashboardStats:
+ *       type: object
+ *       properties:
+ *         cases:
+ *           type: object
+ *           properties:
+ *             total: { type: integer }
+ *             open: { type: integer }
+ *             closed: { type: integer }
+ *             pending: { type: integer }
+ *             archived: { type: integer }
+ *         evidence:
+ *           type: object
+ *           properties:
+ *             total: { type: integer }
+ *             pending: { type: integer }
+ *             approved: { type: integer }
+ *             rejected: { type: integer }
+ *             pendingReview: { type: integer }
+ *             totalStorageBytes: { type: string }
+ *             totalStorageFormatted: { type: string, example: "1.2 GB" }
+ *         users:
+ *           type: object
+ *           nullable: true
+ *           description: null for investigators
+ *           properties:
+ *             total: { type: integer }
+ *             admin: { type: integer }
+ *             supervisor: { type: integer }
+ *             investigator: { type: integer }
+ *         recentCases:
+ *           type: array
+ *           items: { type: object }
+ *         recentUploads:
+ *           type: array
+ *           items: { type: object }
+ *
+ *     MonthlyUpload:
+ *       type: object
+ *       properties:
+ *         month:
+ *           type: string
+ *           example: "2024-01"
+ *         uploads:
+ *           type: integer
+ *         totalSize:
+ *           type: string
+ *           description: Total bytes as string
+ *         totalSizeFormatted:
+ *           type: string
+ *           example: "45.2 MB"
+ */
+
+// =============================================================================
+// ROUTES
+// =============================================================================
+
+/**
+ * @swagger
+ * /api/v1/dashboard/stats:
  *   get:
- *     summary: Get dashboard statistics
+ *     summary: Overall dashboard statistics
+ *     description: |
+ *       Single call that returns a complete snapshot.
+ *       Role-scoped: investigators only see data from their assigned cases.
  *     tags: [Dashboard]
  *     security:
  *       - bearerAuth: []
- *     description: Returns overall system statistics for the dashboard
  *     responses:
  *       200:
  *         description: Dashboard statistics
@@ -24,87 +97,56 @@ const router = express.Router();
  *             schema:
  *               type: object
  *               properties:
- *                 success:
- *                   type: boolean
- *                 data:
- *                   type: object
- *                   properties:
- *                     cases:
- *                       type: object
- *                       properties:
- *                         total:
- *                           type: integer
- *                         open:
- *                           type: integer
- *                         closed:
- *                           type: integer
- *                         pending:
- *                           type: integer
- *                     evidence:
- *                       type: object
- *                       properties:
- *                         total:
- *                           type: integer
- *                         pending:
- *                           type: integer
- *                         approved:
- *                           type: integer
- *                         rejected:
- *                           type: integer
- *                     users:
- *                       type: object
- *                       properties:
- *                         total:
- *                           type: integer
- *                         investigators:
- *                           type: integer
- *                         supervisors:
- *                           type: integer
- *                         admins:
- *                           type: integer
+ *                 success: { type: boolean }
+ *                 data: { $ref: '#/components/schemas/DashboardStats' }
+ *       401:
+ *         description: Not authenticated
  */
-router.get('/stats', (req, res) => {
-  res.status(501).json({ success: false, message: 'Not implemented yet' });
-});
+router.get('/stats',
+  authenticate,
+  dashboardController.getStats
+);
 
 /**
  * @swagger
- * /dashboard/recent-uploads:
+ * /api/v1/dashboard/recent-uploads:
  *   get:
- *     summary: Get recent evidence uploads
+ *     summary: Recent evidence uploads
+ *     description: Latest evidence uploads with full metadata
  *     tags: [Dashboard]
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: query
  *         name: limit
- *         schema:
- *           type: integer
- *           default: 10
+ *         schema: { type: integer, default: 10, maximum: 50 }
+ *         description: Number of uploads to return
  *     responses:
  *       200:
- *         description: List of recent uploads
+ *         description: Recent uploads list
  */
-router.get('/recent-uploads', (req, res) => {
-  res.status(501).json({ success: false, message: 'Not implemented yet' });
-});
+router.get('/recent-uploads',
+  authenticate,
+  dashboardController.getRecentUploads
+);
 
 /**
  * @swagger
- * /dashboard/monthly-uploads:
+ * /api/v1/dashboard/monthly-uploads:
  *   get:
- *     summary: Get monthly upload statistics
+ *     summary: Monthly upload statistics (chart data)
+ *     description: |
+ *       Returns upload counts and total storage per month.
+ *       Every month in the range is present (missing months have count=0),
+ *       making this suitable for direct use in line/bar charts.
  *     tags: [Dashboard]
  *     security:
  *       - bearerAuth: []
- *     description: Returns upload counts grouped by month for chart visualization
  *     parameters:
  *       - in: query
  *         name: months
- *         schema:
- *           type: integer
- *           default: 12
- *         description: Number of months to include
+ *         schema: { type: integer, default: 12, maximum: 24 }
+ *         description: How many months back to include
  *     responses:
  *       200:
  *         description: Monthly upload data
@@ -113,89 +155,39 @@ router.get('/recent-uploads', (req, res) => {
  *             schema:
  *               type: object
  *               properties:
- *                 success:
- *                   type: boolean
+ *                 success: { type: boolean }
  *                 data:
  *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       month:
- *                         type: string
- *                         example: "2024-01"
- *                       uploads:
- *                         type: integer
- *                       totalSize:
- *                         type: integer
- *                         description: Total file size in bytes
+ *                   items: { $ref: '#/components/schemas/MonthlyUpload' }
  */
-router.get('/monthly-uploads', (req, res) => {
-  res.status(501).json({ success: false, message: 'Not implemented yet' });
-});
+router.get('/monthly-uploads',
+  authenticate,
+  dashboardController.getMonthlyUploads
+);
 
 /**
  * @swagger
- * /dashboard/activity:
+ * /api/v1/dashboard/activity:
  *   get:
- *     summary: Get recent system activity
+ *     summary: Recent system activity feed
+ *     description: |
+ *       Live activity feed from the audit log.
+ *       Admin/Supervisor see system-wide activity.
+ *       Investigators see only their own activity.
  *     tags: [Dashboard]
  *     security:
  *       - bearerAuth: []
- *     description: Returns recent activity across the system
  *     parameters:
  *       - in: query
  *         name: limit
- *         schema:
- *           type: integer
- *           default: 20
+ *         schema: { type: integer, default: 20, maximum: 100 }
  *     responses:
  *       200:
- *         description: Recent activity log
+ *         description: Recent activity
  */
-router.get('/activity', (req, res) => {
-  res.status(501).json({ success: false, message: 'Not implemented yet' });
-});
-
-/**
- * @swagger
- * /dashboard/reports/generate:
- *   post:
- *     summary: Generate a PDF report
- *     tags: [Dashboard]
- *     security:
- *       - bearerAuth: []
- *     description: Generates a comprehensive PDF report
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               type:
- *                 type: string
- *                 enum: [case_summary, evidence_inventory, audit_trail, monthly_summary]
- *               caseId:
- *                 type: string
- *                 format: uuid
- *                 description: Required for case_summary and evidence_inventory
- *               startDate:
- *                 type: string
- *                 format: date
- *               endDate:
- *                 type: string
- *                 format: date
- *     responses:
- *       200:
- *         description: PDF report file
- *         content:
- *           application/pdf:
- *             schema:
- *               type: string
- *               format: binary
- */
-router.post('/reports/generate', (req, res) => {
-  res.status(501).json({ success: false, message: 'Not implemented yet' });
-});
+router.get('/activity',
+  authenticate,
+  dashboardController.getRecentActivity
+);
 
 module.exports = router;
