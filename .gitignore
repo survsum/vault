@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Environment files (contain secrets)
+.env
+.env.local
+.env.production
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Uploaded files (should be stored elsewhere in production)
+uploads/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
+
+# Test coverage
+coverage/
+
+# Prisma
+prisma/migrations/*_migration.sql
+
+# Temporary files
+*.tmp
+*.temp
+
+/src/generated/prisma

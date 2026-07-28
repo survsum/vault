@@ -1,0 +1,350 @@
+// =============================================================================
+// Digital Evidence Vault - Prisma Schema
+// =============================================================================
+// This schema defines the database structure for a secure evidence management
+// system used by law enforcement and forensic investigators.
+//
+// Key Design Principles:
+// 1. Normalized design to prevent data redundancy
+// 2. Soft deletes for audit trail (evidence is never truly deleted)
+// 3. Comprehensive audit logging for chain of custody
+// 4. Role-based access control at the data level
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// =============================================================================
+// ENUMS - Define fixed value sets for type safety
+// =============================================================================
+
+// User roles following the principle of least privilege
+enum Role {
+  ADMIN        // Full system access
+  SUPERVISOR   // Can manage cases, approve evidence
+  INVESTIGATOR // Can upload evidence, view assigned cases
+}
+
+// Case status workflow
+enum CaseStatus {
+  OPEN     // Active investigation
+  CLOSED   // Investigation complete
+  PENDING  // Awaiting review or additional info
+  ARCHIVED // Moved to archive (soft delete for cases)
+}
+
+// Evidence review status
+enum EvidenceStatus {
+  PENDING  // Awaiting supervisor approval
+  APPROVED // Verified and accepted
+  REJECTED // Rejected with reason
+}
+
+// Audit action types - every significant action is logged
+enum AuditAction {
+  // Authentication
+  LOGIN
+  LOGOUT
+  LOGIN_FAILED
+  PASSWORD_CHANGED
+  
+  // User management
+  USER_CREATED
+  USER_UPDATED
+  USER_DELETED
+  
+  // Case operations
+  CASE_CREATED
+  CASE_UPDATED
+  CASE_ASSIGNED
+  CASE_CLOSED
+  CASE_REOPENED
+  CASE_DELETED
+  
+  // Evidence operations
+  EVIDENCE_UPLOADED
+  EVIDENCE_DOWNLOADED
+  EVIDENCE_APPROVED
+  EVIDENCE_REJECTED
+  EVIDENCE_DELETED
+  EVIDENCE_INTEGRITY_CHECK
+  EVIDENCE_INTEGRITY_FAILED
+  
+  // System
+  SYSTEM_ERROR
+}
+
+// Entity types for audit log categorization
+enum AuditEntity {
+  USER
+  CASE
+  EVIDENCE
+  SESSION
+  SYSTEM
+}
+
+// =============================================================================
+// USER MODEL
+// =============================================================================
+// Stores user accounts with authentication data and role assignments
+// 
+// Security considerations:
+// - Password is stored as bcrypt hash (never plain text)
+// - Soft delete via deletedAt for audit purposes
+// - refreshToken stored for JWT refresh flow
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  name         String
+  passwordHash String    @map("password_hash")
+  role         Role      @default(INVESTIGATOR)
+  
+  // Authentication tokens
+  refreshToken String?   @map("refresh_token")
+  
+  // Timestamps
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  lastLoginAt  DateTime? @map("last_login_at")
+  
+  // Soft delete - null means active, date means deleted
+  deletedAt    DateTime? @map("deleted_at")
+  
+  // Relations
+  // Cases assigned to this investigator
+  assignedCases    Case[]         @relation("InvestigatorCases")
+  // Cases created by this supervisor/admin
+  createdCases     Case[]         @relation("CreatorCases")
+  // Evidence uploaded by this user
+  uploadedEvidence Evidence[]     @relation("UploaderEvidence")
+  // Evidence approved/rejected by this supervisor
+  reviewedEvidence Evidence[]     @relation("ReviewerEvidence")
+  // Audit logs for actions by this user
+  auditLogs        AuditLog[]
+  // Notifications for this user
+  notifications    Notification[]
+
+  @@index([email])
+  @@index([role])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+// =============================================================================
+// CASE MODEL
+// =============================================================================
+// Represents an investigation case containing multiple pieces of evidence
+//
+// Case numbers are auto-generated for easy reference
+// Cases can be assigned to one investigator but may involve multiple users
+
+model Case {
+  id          String     @id @default(uuid())
+  caseNumber  String     @unique @map("case_number")
+  title       String
+  description String?    @db.Text
+  status      CaseStatus @default(OPEN)
+  
+  // Priority for sorting (1 = highest)
+  priority    Int        @default(3)
+  
+  // Relations
+  // The investigator assigned to this case
+  assignedInvestigatorId String? @map("assigned_investigator_id")
+  assignedInvestigator   User?   @relation("InvestigatorCases", fields: [assignedInvestigatorId], references: [id])
+  
+  // The user who created this case
+  createdById String  @map("created_by_id")
+  createdBy   User    @relation("CreatorCases", fields: [createdById], references: [id])
+  
+  // Evidence items in this case
+  evidence    Evidence[]
+  
+  // Timestamps
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  closedAt    DateTime? @map("closed_at")
+  
+  // Soft delete
+  deletedAt   DateTime? @map("deleted_at")
+
+  @@index([caseNumber])
+  @@index([status])
+  @@index([assignedInvestigatorId])
+  @@index([createdById])
+  @@index([deletedAt])
+  @@map("cases")
+}
+
+// =============================================================================
+// EVIDENCE MODEL
+// =============================================================================
+// Stores metadata about digital evidence files
+//
+// Critical security features:
+// - SHA-256 hash for integrity verification
+// - Original filename preserved separately from storage name
+// - Encryption IV stored for AES-256 decryption
+// - Soft delete ensures evidence is never truly lost
+
+model Evidence {
+  id           String         @id @default(uuid())
+  
+  // File metadata
+  fileName     String         @map("file_name")      // UUID-based storage name
+  originalName String         @map("original_name")  // Original upload name
+  fileType     String         @map("file_type")      // MIME type
+  fileSize     BigInt         @map("file_size")      // Size in bytes
+  storagePath  String         @map("storage_path")   // Relative path to file
+  
+  // Security
+  sha256Hash   String         @map("sha256_hash")    // Integrity verification
+  encryptionIv String?        @map("encryption_iv")  // AES-256 IV (if encrypted)
+  isEncrypted  Boolean        @default(false) @map("is_encrypted")
+  
+  // Status
+  status       EvidenceStatus @default(PENDING)
+  rejectReason String?        @map("reject_reason")  // Reason if rejected
+  
+  // Description/notes
+  description  String?        @db.Text
+  
+  // Relations
+  // The case this evidence belongs to
+  caseId       String         @map("case_id")
+  case         Case           @relation(fields: [caseId], references: [id])
+  
+  // Who uploaded this evidence
+  uploadedById String         @map("uploaded_by_id")
+  uploadedBy   User           @relation("UploaderEvidence", fields: [uploadedById], references: [id])
+  
+  // Who approved/rejected this evidence
+  reviewedById String?        @map("reviewed_by_id")
+  reviewedBy   User?          @relation("ReviewerEvidence", fields: [reviewedById], references: [id])
+  reviewedAt   DateTime?      @map("reviewed_at")
+  
+  // Timestamps
+  uploadedAt   DateTime       @default(now()) @map("uploaded_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+  
+  // Soft delete
+  deletedAt    DateTime?      @map("deleted_at")
+  deletedById  String?        @map("deleted_by_id")
+
+  @@index([caseId])
+  @@index([uploadedById])
+  @@index([status])
+  @@index([sha256Hash])
+  @@index([deletedAt])
+  @@map("evidence")
+}
+
+// =============================================================================
+// AUDIT LOG MODEL
+// =============================================================================
+// Complete chain of custody logging - immutable record of all actions
+//
+// This is the core of the chain of custody system:
+// - Every action is recorded with who, what, when, where
+// - Records are NEVER deleted (no deletedAt)
+// - Stores additional context in JSON details field
+
+model AuditLog {
+  id          String      @id @default(uuid())
+  
+  // Who performed the action
+  userId      String?     @map("user_id")
+  user        User?       @relation(fields: [userId], references: [id])
+  
+  // What action was performed
+  action      AuditAction
+  
+  // What entity was affected
+  entity      AuditEntity
+  entityId    String?     @map("entity_id")  // ID of affected record
+  
+  // Request context
+  ipAddress   String?     @map("ip_address")
+  userAgent   String?     @map("user_agent")
+  
+  // Additional details stored as JSON
+  // Examples: old values, new values, error messages
+  details     Json?
+  
+  // When - immutable timestamp
+  timestamp   DateTime    @default(now())
+
+  // NO deletedAt - audit logs are permanent!
+
+  @@index([userId])
+  @@index([action])
+  @@index([entity])
+  @@index([entityId])
+  @@index([timestamp])
+  @@map("audit_logs")
+}
+
+// =============================================================================
+// NOTIFICATION MODEL
+// =============================================================================
+// User notifications for important events
+//
+// Examples:
+// - Evidence approved/rejected
+// - Case assigned
+// - Case status changed
+
+model Notification {
+  id        String   @id @default(uuid())
+  
+  // Who receives this notification
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id])
+  
+  // Notification content
+  title     String
+  message   String   @db.Text
+  
+  // Link to relevant entity (optional)
+  linkType  String?  @map("link_type")  // "case", "evidence", etc.
+  linkId    String?  @map("link_id")    // ID of linked entity
+  
+  // Read status
+  isRead    Boolean  @default(false) @map("is_read")
+  readAt    DateTime? @map("read_at")
+  
+  // Timestamps
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+// =============================================================================
+// REFRESH TOKEN MODEL (Optional - for token blacklisting)
+// =============================================================================
+// Stores refresh tokens for JWT authentication
+// Allows for token revocation on logout
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  revokedAt DateTime? @map("revoked_at")
+  
+  @@index([token])
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
